@@ -1,28 +1,3 @@
-""" Vision Transformer (ViT) in PyTorch
-
-A PyTorch implement of Vision Transformers as described in:
-
-'An Image Is Worth 16 x 16 Words: Transformers for Image Recognition at Scale'
-    - https://arxiv.org/abs/2010.11929
-
-`How to train your ViT? Data, Augmentation, and Regularization in Vision Transformers`
-    - https://arxiv.org/abs/2106.10270
-
-`FlexiViT: One Model for All Patch Sizes`
-    - https://arxiv.org/abs/2212.08013
-
-The official jax code is released and available at
-  * https://github.com/google-research/vision_transformer
-  * https://github.com/google-research/big_vision
-
-Acknowledgments:
-  * The paper authors for releasing code and weights, thanks!
-  * I fixed my class token impl based on Phil Wang's https://github.com/lucidrains/vit-pytorch
-  * Simple transformer style inspired by Andrej Karpathy's https://github.com/karpathy/minGPT
-  * Bert reference code checks against Huggingface Transformers and Tensorflow Bert
-
-Hacked together by / Copyright 2020, Ross Wightman
-"""
 import logging
 import math
 from collections import OrderedDict
@@ -50,12 +25,12 @@ __all__ = ['VisionTransformer']  # model_registry will add each entrypoint fn to
 _logger = logging.getLogger(__name__)
 
 
-class Attention(nn.Module):
+class Attention(nn.Module): # same as CoFiBertSelfAttention part
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
-        head_dim = dim // num_heads
+        head_dim = dim // num_heads #floor division
         self.scale = head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
