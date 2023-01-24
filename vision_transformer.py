@@ -25,7 +25,7 @@ __all__ = ['VisionTransformer']  # model_registry will add each entrypoint fn to
 _logger = logging.getLogger(__name__)
 
 
-class Attention(nn.Module): # same as CoFiBertSelfAttention part
+class Attention(nn.Module): # almost same as CoFiBertSelfAttention part
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -38,16 +38,27 @@ class Attention(nn.Module): # same as CoFiBertSelfAttention part
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None,
+                output_attentions=False,
+                head_z=None):
+        #因為這裡的v被融入qkv，但我們看qkv應該也依樣能知道有沒有被整個prune掉？
+        #if self.qkv is None:
+            #return (None, None) if output_attentions else (None,) 
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
+         # 3代表qkv，self.num_heads表示多头，通过permute变成(3,B,多头数,N,输出的短的qkv：96/3)
+        q, k, v = qkv.unbind(0)   # 總之就是切成qkv
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = (q @ k.transpose(-2, -1)) * self.scale # @矩阵乘法运算符，普通矩阵乘法,q和k都是多维矩阵
+        if attention_mask is not None:
+            attn=attn+attention_mask
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v)
+        if head_z is not None: #cofi是在算完之後乘過head_z再把他reshape，雖然我不知道以下操作是否相等
+            x *= head_z
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
