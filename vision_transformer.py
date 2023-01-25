@@ -49,7 +49,7 @@ class Attention(nn.Module): # almost same as CoFiBertSelfAttention part
          # 3代表qkv，self.num_heads表示多头，通过permute变成(3,B,多头数,N,输出的短的qkv：96/3)
         q, k, v = qkv.unbind(0)   # 總之就是切成qkv
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale # @矩阵乘法运算符，普通矩阵乘法,q和k都是多维矩阵
+        attn = (q @ k.transpose(-2, -1)) * self.scale ## @矩阵乘法运算符，普通矩阵乘法,q和k都是多维矩阵
         if attention_mask is not None:
             attn=attn+attention_mask
         attn = attn.softmax(dim=-1)
@@ -59,7 +59,7 @@ class Attention(nn.Module): # almost same as CoFiBertSelfAttention part
         if head_z is not None: #cofi是在算完之後乘過head_z再把他reshape，雖然我不知道以下操作是否相等
             x *= head_z
         x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
+        x = self.proj(x) 
         x = self.proj_drop(x)
         return x
 
