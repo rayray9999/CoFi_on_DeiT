@@ -497,11 +497,20 @@ class DeiTSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, head_layer_z=None, hidden_z=None, inference=False) -> torch.Tensor:
+        if hidden_states is None:## modify from cofi
+            return input_tensor
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
+        if head_layer_z is not None:
+            hidden_states = hidden_states.mul(head_layer_z)
+        if not inference and hidden_states.sum().eq(0).item():
+            hidden_states = hidden_states + input_tensor
+        else:
+            if hidden_z is not None:
+                hidden_states = hidden_states.mul(hidden_z)
+            hidden_states = self.dropout(hidden_states)
+            if hidden_z is not None:
+                hidden_states = hidden_states.mul(hidden_z)
         return hidden_states
 
 
