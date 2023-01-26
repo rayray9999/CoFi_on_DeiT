@@ -330,7 +330,7 @@ class DeiTLayer(nn.Module):
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = DeiTAttention(config)
-        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function
+        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function same as in bertlayer
         self.output = DeiTOutput(config)
         ##change to costum DeiTLayerNorm
         self.layernorm_before = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -341,26 +341,40 @@ class DeiTLayer(nn.Module):
         hidden_states: torch.Tensor,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
+        head_z=None, ##add mask
+        head_layer_z=None,
+        intermediate_z=None,
+        mlp_z=None,
+        hidden_z=None
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in DeiT, layernorm is applied before self-attention
             head_mask,
             output_attentions=output_attentions,
+            head_z=head_z,
+            head_layer_z=head_layer_z,
+            hidden_z=hidden_z
         )
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+        if self.intermediate.dense is None:
+            layer_output = attention_output
+        else:
+            self.intermediate_z = intermediate_z
+            self.mlp_z = mlp_z
+            self.hidden_z = hidden_z
+            # first residual connection 就是所謂的add
+            hidden_states = attention_output + hidden_states##這個在CoFi裡面沒有，怪怪的
 
-        # first residual connection 就是所謂的add
-        hidden_states = attention_output + hidden_states
+            # in DeiT, layernorm is also applied after self-attention
+            layer_output = self.layernorm_after(hidden_states)
+            layer_output = self.intermediate(layer_output)
+            if self.intermediate_z is not None:
+                intermediate_output = intermediate_output.mul(self.intermediate_z)
+            ## go through output add mask parameter
+            layer_output = self.output(layer_output, hidden_states, self.mlp_z, self.hidden_z)
 
-        # in DeiT, layernorm is also applied after self-attention
-        layer_output = self.layernorm_after(hidden_states)
-        layer_output = self.intermediate(layer_output)
-
-        # second residual connection is done here
-        layer_output = self.output(layer_output, hidden_states)
-
-        outputs = (layer_output,) + outputs
+            outputs = (layer_output,) + outputs #這裡在CoFi裡面會加上(attention_output, )，看不懂
 
         return outputs
 
