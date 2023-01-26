@@ -257,6 +257,11 @@ class DeiTEncoder(nn.Module):
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
+        head_z=None,
+        head_layer_z=None,
+        intermediate_z=None,
+        mlp_z=None,
+        hidden_z=None
     ) -> Union[tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -264,8 +269,7 @@ class DeiTEncoder(nn.Module):
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
-
-            layer_head_mask = head_mask[i] if head_mask is not None else None
+            layer_head_mask = head_mask[i] if head_mask is not None else None #DeiT do this, I'm not sure
 
             if self.gradient_checkpointing and self.training:
 
@@ -281,7 +285,16 @@ class DeiTEncoder(nn.Module):
                     layer_head_mask,
                 )
             else:
-                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions)
+                layer_outputs = layer_module(
+                hidden_states,
+                layer_head_mask,##modify as CoFi
+                output_attentions,
+                intermediate_z=intermediate_z[i] if intermediate_z is not None else None,
+                head_z=head_z[i] if head_z is not None else None,
+                mlp_z=mlp_z[i] if mlp_z is not None else None,
+                head_layer_z=head_layer_z[i] if head_layer_z is not None else None,
+                hidden_z=hidden_z
+            )
 
             hidden_states = layer_outputs[0]
 
