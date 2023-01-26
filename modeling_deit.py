@@ -110,6 +110,7 @@ class DeiTEmbeddings(nn.Module):
         distillation_tokens = self.distillation_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, distillation_tokens, embeddings), dim=1)
         embeddings = embeddings + self.position_embeddings
+        #/ missing layernorm in bert
         embeddings = self.dropout(embeddings)
         return embeddings
 
@@ -148,358 +149,6 @@ class DeiTPatchEmbeddings(nn.Module):
             )
         x = self.projection(pixel_values).flatten(2).transpose(1, 2)
         return x
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTSelfAttention with ViT->DeiT
-class DeiTSelfAttention(nn.Module):
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
-            raise ValueError(
-                f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
-                f"heads {config.num_attention_heads}."
-            )
-        #self.config = config #cofi
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-        #bias就是那個ax+b的b吧，看起來是可以透過config調
-        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-    #q跟k可以做矩陣運算
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
-
-    def forward(
-        self, 
-        hidden_states, 
-        attention_mask = None, ##新的mask
-        head_mask = None, ##我改成CoFi的格式
-        output_attentions: bool = False
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]: 
-        #上面在講forward可以return 兩個
-        if self.value is None: ##cofi，如果沒有v就直接停掉
-            return (None, None) if output_attentions else (None,)
-        mixed_query_layer = self.query(hidden_states)
-
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-
-        if attention_mask is not None: ##mask操作 by cofi
-            attention_scores = attention_scores + attention_mask
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        # Mask heads if we want to
-        if head_mask is not None:
-            attention_probs = attention_probs * head_mask
-
-        context_layer = torch.matmul(attention_probs, value_layer)
-
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
-
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-
-        return outputs
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTSelfOutput with ViT->DeiT
-class DeiTSelfOutput(nn.Module):
-    """
-    The residual connection is defined in DeiTLayer instead of here (as is the case with other models), due to the
-    layernorm applied before each block.
-    """
-
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        return hidden_states
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTAttention with ViT->DeiT
-class DeiTAttention(nn.Module):
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.attention = DeiTSelfAttention(config)
-        self.output = DeiTSelfOutput(config)
-        self.pruned_heads = set()
-
-    def prune_heads(self, heads: Set[int]) -> None:
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.attention.num_attention_heads, self.attention.attention_head_size, self.pruned_heads
-        )
-
-        # Prune linear layers
-        self.attention.query = prune_linear_layer(self.attention.query, index)
-        self.attention.key = prune_linear_layer(self.attention.key, index)
-        self.attention.value = prune_linear_layer(self.attention.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
-
-        # Update hyper params and store pruned heads
-        self.attention.num_attention_heads = self.attention.num_attention_heads - len(heads)
-        self.attention.all_head_size = self.attention.attention_head_size * self.attention.num_attention_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        self_outputs = self.attention(hidden_states, head_mask, output_attentions)
-
-        attention_output = self.output(self_outputs[0], hidden_states)
-
-        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
-        return outputs
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTIntermediate with ViT->DeiT
-class DeiTIntermediate(nn.Module):
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        if isinstance(config.hidden_act, str):
-            #ACT2FN是激活函数的字典，ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
-            self.intermediate_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.intermediate_act_fn = config.hidden_act
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-
-        return hidden_states
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTOutput with ViT->DeiT
-class DeiTOutput(nn.Module):
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, mlp_z, hidden_z=None, inference=False) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        if mlp_z is not None:##加上mlp mask
-            hidden_states *= mlp_z
-        if not inference and hidden_states.sum().eq(0).item():##照著Cofi加，我不確定要幹嘛
-            return hidden_states + input_tensor
-        else:
-            if hidden_z is not None: ##mask
-                hidden_states = hidden_states.mul(hidden_z)
-            hidden_states = self.dropout(hidden_states)
-            hidden_states = hidden_states + input_tensor ##Cofi在這裡是作layerNorm，但這個處理應該有被放在DeiTlayer
-            if hidden_z is not None:## mask
-                hidden_states = hidden_states.mul(hidden_z)
-        return hidden_states
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTLayer with ViT->DeiT
-class DeiTLayer(nn.Module):
-    """This corresponds to the Block class in the timm implementation."""
-
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.chunk_size_feed_forward = config.chunk_size_feed_forward
-        self.seq_len_dim = 1
-        self.attention = DeiTAttention(config)
-        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function same as in bertlayer
-        self.output = DeiTOutput(config)
-        ##change to costum DeiTLayerNorm
-        self.layernorm_before = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        head_z=None, ##add mask
-        head_layer_z=None,
-        intermediate_z=None,
-        mlp_z=None,
-        hidden_z=None
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        self_attention_outputs = self.attention(
-            self.layernorm_before(hidden_states),  # in DeiT, layernorm is applied before self-attention
-            head_mask,
-            output_attentions=output_attentions,
-            head_z=head_z,
-            head_layer_z=head_layer_z,
-            hidden_z=hidden_z
-        )
-        attention_output = self_attention_outputs[0]
-        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
-        if self.intermediate.dense is None:
-            layer_output = attention_output
-        else:
-            self.intermediate_z = intermediate_z
-            self.mlp_z = mlp_z
-            self.hidden_z = hidden_z
-            # first residual connection 就是所謂的add
-            hidden_states = attention_output + hidden_states##這個在CoFi裡面沒有，怪怪的
-
-            # in DeiT, layernorm is also applied after self-attention
-            layer_output = self.layernorm_after(hidden_states)
-            layer_output = self.intermediate(layer_output)
-            if self.intermediate_z is not None:
-                intermediate_output = intermediate_output.mul(self.intermediate_z)
-            ## go through output add mask parameter
-            layer_output = self.output(layer_output, hidden_states, self.mlp_z, self.hidden_z)
-
-            outputs = (layer_output,) + outputs #這裡在CoFi裡面會加上(attention_output, )，看不懂
-
-        return outputs
-
-
-# Copied from transformers.models.vit.modeling_vit.ViTEncoder with ViT->DeiT
-class DeiTEncoder(nn.Module):
-    def __init__(self, config: DeiTConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.layer = nn.ModuleList([DeiTLayer(config) for _ in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = False
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ) -> Union[tuple, BaseModelOutput]:
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
-
-        for i, layer_module in enumerate(self.layer):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            layer_head_mask = head_mask[i] if head_mask is not None else None
-
-            if self.gradient_checkpointing and self.training:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs, output_attentions)
-
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(layer_module),
-                    hidden_states,
-                    layer_head_mask,
-                )
-            else:
-                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions)
-
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attentions,
-        )
-
-##below function have layernorm but I'm not sure how to change
-class DeiTPreTrainedModel(PreTrainedModel):
-    """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
-    models.
-    """
-
-    config_class = DeiTConfig
-    base_model_prefix = "deit"
-    main_input_name = "pixel_values"
-    supports_gradient_checkpointing = True
-    _no_split_modules = []
-    ##not sure
-    def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
-        """Initialize the weights"""
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
-            # `trunc_normal_cpu` not implemented in `half` issues
-            module.weight.data = nn.init.trunc_normal_(
-                module.weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
-            ).to(module.weight.dtype)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
-    def _set_gradient_checkpointing(self, module: DeiTEncoder, value: bool = False) -> None:
-        if isinstance(module, DeiTEncoder):
-            module.gradient_checkpointing = value
-
-
-DEIT_START_DOCSTRING = r"""
-    This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass. Use it
-    as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage and
-    behavior.
-
-    Parameters:
-        config ([`DeiTConfig`]): Model configuration class with all the parameters of the model.
-            Initializing with a config file does not load the weights associated with the model, only the
-            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
-"""
-
-DEIT_INPUTS_DOCSTRING = r"""
-    Args:
-        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See
-            [`DeiTImageProcessor.__call__`] for details.
-
-        head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
 
 
 @add_start_docstrings(
@@ -592,6 +241,358 @@ class DeiTModel(DeiTPreTrainedModel):
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
+
+# Copied from transformers.models.vit.modeling_vit.ViTEncoder with ViT->DeiT
+class DeiTEncoder(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList([DeiTLayer(config) for _ in range(config.num_hidden_layers)])
+        self.gradient_checkpointing = False
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+    ) -> Union[tuple, BaseModelOutput]:
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+
+            if self.gradient_checkpointing and self.training:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return module(*inputs, output_attentions)
+
+                    return custom_forward
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(layer_module),
+                    hidden_states,
+                    layer_head_mask,
+                )
+            else:
+                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions)
+
+            hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
+        return BaseModelOutput(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+        )
+
+
+# Copied from transformers.models.vit.modeling_vit.ViTLayer with ViT->DeiT
+class DeiTLayer(nn.Module):
+    """This corresponds to the Block class in the timm implementation."""
+
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.attention = DeiTAttention(config)
+        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function same as in bertlayer
+        self.output = DeiTOutput(config)
+        ##change to costum DeiTLayerNorm
+        self.layernorm_before = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        head_z=None, ##add mask
+        head_layer_z=None,
+        intermediate_z=None,
+        mlp_z=None,
+        hidden_z=None
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        self_attention_outputs = self.attention(
+            self.layernorm_before(hidden_states),  # in DeiT, layernorm is applied before self-attention
+            head_mask,
+            output_attentions=output_attentions,
+            head_z=head_z,
+            head_layer_z=head_layer_z,
+            hidden_z=hidden_z
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+        if self.intermediate.dense is None:
+            layer_output = attention_output
+        else:
+            self.intermediate_z = intermediate_z
+            self.mlp_z = mlp_z
+            self.hidden_z = hidden_z
+            # first residual connection 就是所謂的add
+            hidden_states = attention_output + hidden_states##這個在CoFi裡面沒有，怪怪的
+
+            # in DeiT, layernorm is also applied after self-attention
+            layer_output = self.layernorm_after(hidden_states)
+            layer_output = self.intermediate(layer_output)
+            if self.intermediate_z is not None:
+                intermediate_output = intermediate_output.mul(self.intermediate_z)
+            ## go through output add mask parameter
+            layer_output = self.output(layer_output, hidden_states, self.mlp_z, self.hidden_z)
+
+            outputs = (layer_output,) + outputs #這裡在CoFi裡面會加上(attention_output, )，看不懂
+
+        return outputs
+
+# Copied from transformers.models.vit.modeling_vit.ViTIntermediate with ViT->DeiT
+class DeiTIntermediate(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        if isinstance(config.hidden_act, str):
+            #ACT2FN是激活函数的字典，ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
+            self.intermediate_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.intermediate_act_fn = config.hidden_act
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+
+        return hidden_states
+
+# Copied from transformers.models.vit.modeling_vit.ViTAttention with ViT->DeiT
+class DeiTAttention(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.attention = DeiTSelfAttention(config)
+        self.output = DeiTSelfOutput(config)
+        self.pruned_heads = set()
+
+    def prune_heads(self, heads: Set[int]) -> None:
+        if len(heads) == 0:
+            return
+        heads, index = find_pruneable_heads_and_indices(
+            heads, self.attention.num_attention_heads, self.attention.attention_head_size, self.pruned_heads
+        )
+
+        # Prune linear layers
+        self.attention.query = prune_linear_layer(self.attention.query, index)
+        self.attention.key = prune_linear_layer(self.attention.key, index)
+        self.attention.value = prune_linear_layer(self.attention.value, index)
+        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
+
+        # Update hyper params and store pruned heads
+        self.attention.num_attention_heads = self.attention.num_attention_heads - len(heads)
+        self.attention.all_head_size = self.attention.attention_head_size * self.attention.num_attention_heads
+        self.pruned_heads = self.pruned_heads.union(heads)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        self_outputs = self.attention(hidden_states, head_mask, output_attentions)
+
+        attention_output = self.output(self_outputs[0], hidden_states)
+
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
+
+
+# Copied from transformers.models.vit.modeling_vit.ViTSelfAttention with ViT->DeiT
+class DeiTSelfAttention(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+            raise ValueError(
+                f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
+                f"heads {config.num_attention_heads}."
+            )
+        #self.config = config #cofi
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+        #bias就是那個ax+b的b吧，看起來是可以透過config調
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+    #q跟k可以做矩陣運算
+    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(
+        self, 
+        hidden_states, 
+        attention_mask = None, ##新的mask
+        head_mask = None, ##我改成CoFi的格式
+        output_attentions: bool = False
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]: 
+        #上面在講forward可以return 兩個
+        if self.value is None: ##cofi，如果沒有v就直接停掉
+            return (None, None) if output_attentions else (None,)
+        mixed_query_layer = self.query(hidden_states)
+
+        key_layer = self.transpose_for_scores(self.key(hidden_states))
+        value_layer = self.transpose_for_scores(self.value(hidden_states))
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
+        if attention_mask is not None: ##mask操作 by cofi
+            attention_scores = attention_scores + attention_mask
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        # Mask heads if we want to
+        if head_mask is not None:
+            attention_probs = attention_probs * head_mask
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(new_context_layer_shape)
+
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+
+        return outputs
+
+
+# Copied from transformers.models.vit.modeling_vit.ViTSelfOutput with ViT->DeiT
+class DeiTSelfOutput(nn.Module):
+    """
+    The residual connection is defined in DeiTLayer instead of here (as is the case with other models), due to the
+    layernorm applied before each block.
+    """
+
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        return hidden_states
+
+
+
+# Copied from transformers.models.vit.modeling_vit.ViTOutput with ViT->DeiT
+class DeiTOutput(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None:
+        super().__init__()
+        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, mlp_z, hidden_z=None, inference=False) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        if mlp_z is not None:##加上mlp mask
+            hidden_states *= mlp_z
+        if not inference and hidden_states.sum().eq(0).item():##照著Cofi加，我不確定要幹嘛
+            return hidden_states + input_tensor
+        else:
+            if hidden_z is not None: ##mask
+                hidden_states = hidden_states.mul(hidden_z)
+            hidden_states = self.dropout(hidden_states)
+            hidden_states = hidden_states + input_tensor ##Cofi在這裡是作layerNorm，但這個處理應該有被放在DeiTlayer
+            if hidden_z is not None:## mask
+                hidden_states = hidden_states.mul(hidden_z)
+        return hidden_states
+
+
+
+##below function have layernorm but I'm not sure how to change
+class DeiTPreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = DeiTConfig
+    base_model_prefix = "deit"
+    main_input_name = "pixel_values"
+    supports_gradient_checkpointing = True
+    _no_split_modules = []
+    ##not sure
+    def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
+        """Initialize the weights"""
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
+            # `trunc_normal_cpu` not implemented in `half` issues
+            module.weight.data = nn.init.trunc_normal_(
+                module.weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
+            ).to(module.weight.dtype)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def _set_gradient_checkpointing(self, module: DeiTEncoder, value: bool = False) -> None:
+        if isinstance(module, DeiTEncoder):
+            module.gradient_checkpointing = value
+
+
+DEIT_START_DOCSTRING = r"""
+    This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass. Use it
+    as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage and
+    behavior.
+
+    Parameters:
+        config ([`DeiTConfig`]): Model configuration class with all the parameters of the model.
+            Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+"""
+
+DEIT_INPUTS_DOCSTRING = r"""
+    Args:
+        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See
+            [`DeiTImageProcessor.__call__`] for details.
+
+        head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
+            Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
+
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
+
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
 
 
 # Copied from transformers.models.vit.modeling_vit.ViTPooler with ViT->DeiT
