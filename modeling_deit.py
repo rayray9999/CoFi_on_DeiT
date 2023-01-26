@@ -24,7 +24,6 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from ...activations import ACT2FN
 from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput, MaskedLMOutput
 from ...modeling_utils import PreTrainedModel
@@ -38,7 +37,8 @@ from ...utils import (
     replace_return_docstrings,
 )
 from .configuration_deit import DeiTConfig
-
+##Cofi use below import
+from torch.nn import functional as F
 
 logger = logging.get_logger(__name__)
 
@@ -58,6 +58,26 @@ DEIT_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "facebook/deit-base-distilled-patch16-224",
     # See all DeiT models at https://huggingface.co/models?filter=deit
 ]
+class DeiTLayerNorm(torch.nn.LayerNorm): ##copy from cofi
+    def __init__(self, normalized_shape, eps: float = 1e-5, elementwise_affine: bool = True) -> None:
+        super().__init__(normalized_shape, eps, elementwise_affine)
+
+    def forward(self, input, hidden_z=None):
+        if hidden_z is not None:
+            remaining_index = torch.where(~hidden_z.eq(0))[0]
+            compressed_input = torch.index_select(
+                input, dim=-1, index=remaining_index)
+            compressed_weight = self.weight[remaining_index]
+            compressed_bias = self.bias[remaining_index]
+            normalized_shape = len(remaining_index)
+            normed_input = F.layer_norm(
+                compressed_input, [normalized_shape], compressed_weight, compressed_bias, self.eps)
+            output = input.clone()
+            output[:, :, remaining_index] = normed_input
+        else:
+            output = F.layer_norm(
+                input, self.normalized_shape, self.weight, self.bias, self.eps)
+        return output
 
 
 class DeiTEmbeddings(nn.Module):
@@ -303,10 +323,11 @@ class DeiTLayer(nn.Module):
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = DeiTAttention(config)
-        self.intermediate = DeiTIntermediate(config)
+        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function
         self.output = DeiTOutput(config)
-        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        ##change to costum DeiTLayerNorm
+        self.layernorm_before = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -394,7 +415,7 @@ class DeiTEncoder(nn.Module):
             attentions=all_self_attentions,
         )
 
-
+##below function have layernorm but I'm not sure how to change
 class DeiTPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
@@ -406,7 +427,7 @@ class DeiTPreTrainedModel(PreTrainedModel):
     main_input_name = "pixel_values"
     supports_gradient_checkpointing = True
     _no_split_modules = []
-
+    ##not sure
     def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
         """Initialize the weights"""
         if isinstance(module, (nn.Linear, nn.Conv2d)):
@@ -471,8 +492,8 @@ class DeiTModel(DeiTPreTrainedModel):
 
         self.embeddings = DeiTEmbeddings(config, use_mask_token=use_mask_token)
         self.encoder = DeiTEncoder(config)
-
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        ##DeiTLayerNorm
+        self.layernorm = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.pooler = DeiTPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
