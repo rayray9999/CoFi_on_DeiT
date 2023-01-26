@@ -286,6 +286,7 @@ class DeiTIntermediate(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
+            #ACT2FN是激活函数的字典，ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
@@ -304,13 +305,19 @@ class DeiTOutput(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, mlp_z, hidden_z=None, inference=False) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        hidden_states = hidden_states + input_tensor
-
+        if mlp_z is not None:##加上mlp mask
+            hidden_states *= mlp_z
+        if not inference and hidden_states.sum().eq(0).item():##照著Cofi加，我不確定要幹嘛
+            return hidden_states + input_tensor
+        else:
+            if hidden_z is not None: ##mask
+                hidden_states = hidden_states.mul(hidden_z)
+            hidden_states = self.dropout(hidden_states)
+            hidden_states = hidden_states + input_tensor ##Cofi在這裡是作layerNorm，但這個處理應該有被放在DeiTlayer
+            if hidden_z is not None:## mask
+                hidden_states = hidden_states.mul(hidden_z)
         return hidden_states
 
 
