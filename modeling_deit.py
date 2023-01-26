@@ -196,6 +196,11 @@ class DeiTModel(DeiTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        head_layer_z=None,
+        head_z=None,
+        intermediate_z=None,
+        mlp_z=None,
+        hidden_z=None
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -218,7 +223,7 @@ class DeiTModel(DeiTPreTrainedModel):
         if pixel_values.dtype != expected_dtype:
             pixel_values = pixel_values.to(expected_dtype)
 
-        embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
+        embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos, hidden_z=hidden_z)
 
         encoder_outputs = self.encoder(
             embedding_output,
@@ -226,6 +231,13 @@ class DeiTModel(DeiTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            #attention_mask=extended_attention_mask,
+            #encoder_hidden_states=encoder_hidden_states,
+            intermediate_z=intermediate_z,
+            head_z=head_z,
+            mlp_z=mlp_z,
+            head_layer_z=head_layer_z,
+            hidden_z=hidden_z
         )
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
