@@ -96,7 +96,8 @@ class DeiTEmbeddings(nn.Module):
         self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 2, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.BoolTensor] = None) -> torch.Tensor:
+    ## parameter add: hidden_z
+    def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.BoolTensor] = None, hidden_z = None) -> torch.Tensor:
         embeddings = self.patch_embeddings(pixel_values)
         batch_size, seq_length, _ = embeddings.size()
 
@@ -110,9 +111,20 @@ class DeiTEmbeddings(nn.Module):
         distillation_tokens = self.distillation_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, distillation_tokens, embeddings), dim=1)
         embeddings = embeddings + self.position_embeddings
+
+
+        ##
+        if hidden_z is not None:
+            embeddings = embeddings.mul(hidden_z)
+
         #/ missing layernorm in bert
         embeddings = self.dropout(embeddings)
+
+        ##
+        if hidden_z is not None:
+            embeddings = embeddings.mul(hidden_z)
         return embeddings
+
 
 
 class DeiTPatchEmbeddings(nn.Module):
