@@ -110,33 +110,7 @@ class L0Module(Module):
         else:
             return Parameter(torch.Tensor(size))
 
-    def initialize_hidden(self):
-        self.hidden_loga = self.initialize_parameters(self.hidden_size)
-        self.add_one_module(self.hidden_loga, type="hidden", 
-                            parameter_per_dim=self.hidden_size * 4 + self.hidden_size * 4 * 2,
-                            size=self.hidden_size, shape=[self.hidden_size])
-        self.reset_loga(self.hidden_loga, mean=10)
-        logger.info(f"Initialized hidden loga! Prunable_model_size = {self.prunable_model_size}")
-
-    def initialize_structured_head(self, add_prunable_model_size=True):
-        self.head_loga = self.initialize_parameters(self.num_attention_heads, self.num_hidden_layers)
-        self.reset_loga(self.head_loga, mean=10)
-        self.add_one_module(self.head_loga, type="head", 
-                            parameter_per_dim=self.params_per_head, size=self.num_attention_heads,
-                            shape=[self.num_hidden_layers, 1, self.num_attention_heads, 1, 1])
-        if add_prunable_model_size:
-            self.prunable_model_size += self.params_per_head * self.num_hidden_layers * self.num_attention_heads
-        logger.info(f"Initialized structured heads! Prunable_model_size = {self.prunable_model_size}")
-
-    def initialized_layer_structured_heads(self):
-        n_layer = self.num_hidden_layers
-        self.headlayer_loga = self.initialize_parameters(n_layer)
-        self.reset_loga(self.headlayer_loga, mean=10)
-        self.add_one_module(self.headlayer_loga, type="head_layer", 
-                            parameter_per_dim=self.params_per_head * self.num_attention_heads, size=1,
-                            shape=[n_layer])
-        logger.info(f"Initialized layerwise structured heads! Prunable_model_size = {self.prunable_model_size}")
-
+    # structured_mlp -> intermediate
     def initialize_structured_mlp(self):
         self.int_loga = self.initialize_parameters(self.intermediate_size, self.num_hidden_layers)
 
@@ -147,7 +121,27 @@ class L0Module(Module):
         self.reset_loga(self.int_loga)
         logger.info(f"Initialized structured mlp! Prunable_model_size = {self.prunable_model_size}")
 
+    # structured_head -> head
+    def initialize_structured_head(self, add_prunable_model_size=True):
+        self.head_loga = self.initialize_parameters(self.num_attention_heads, self.num_hidden_layers)
+        self.reset_loga(self.head_loga, mean=10)
+        self.add_one_module(self.head_loga, type="head", 
+                            parameter_per_dim=self.params_per_head, size=self.num_attention_heads,
+                            shape=[self.num_hidden_layers, 1, self.num_attention_heads, 1, 1])
+        if add_prunable_model_size:
+            self.prunable_model_size += self.params_per_head * self.num_hidden_layers * self.num_attention_heads
+        logger.info(f"Initialized structured heads! Prunable_model_size = {self.prunable_model_size}")
 
+    # hidden -> hidden
+    def initialize_hidden(self):
+        self.hidden_loga = self.initialize_parameters(self.hidden_size)
+        self.add_one_module(self.hidden_loga, type="hidden", 
+                            parameter_per_dim=self.hidden_size * 4 + self.hidden_size * 4 * 2,
+                            size=self.hidden_size, shape=[self.hidden_size])
+        self.reset_loga(self.hidden_loga, mean=10)
+        logger.info(f"Initialized hidden loga! Prunable_model_size = {self.prunable_model_size}")
+
+    # layer -> mlp
     def initialize_whole_mlp(self):
         n_layer = self.num_hidden_layers
         self.intlayer_loga = self.initialize_parameters(n_layer)
@@ -157,26 +151,35 @@ class L0Module(Module):
         self.reset_loga(self.intlayer_loga, mean=10)
         logger.info(f"Initialized whole mlps! Prunable_model_size = {self.prunable_model_size}")
 
+    # layer -> head_layer
+    def initialized_layer_structured_heads(self):
+        n_layer = self.num_hidden_layers
+        self.headlayer_loga = self.initialize_parameters(n_layer)
+        self.reset_loga(self.headlayer_loga, mean=10)
+        self.add_one_module(self.headlayer_loga, type="head_layer", 
+                            parameter_per_dim=self.params_per_head * self.num_attention_heads, size=1,
+                            shape=[n_layer])
+        logger.info(f"Initialized layerwise structured heads! Prunable_model_size = {self.prunable_model_size}")
 
     def reset_loga(self, tensor, mean=None):
         if mean is None:
-            mean = math.log(1 - self.droprate_init) - math.log(self.droprate_init)
+            mean = math.log(1 - self.droprate_init) - math.log(self.droprate_init) # log[(1 - di)/di]
         tensor.data.normal_(mean, 1e-2)
 
-    def reset_qz_logas(self):
+    def reset_qz_logas(self): # unused?
         for key in self.z_logas:
             if key in ["head_layer", "mlp", "head"]:
                 self.reset_loga(self.z_logas[key], 10)
-            else:
+            else: # hidden
                 self.reset_loga(self.z_logas[key])
 
-    def constrain_parameters(self):
+    def constrain_parameters(self): # no extreme value
         def _constrain(tensor):
             tensor.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
         for key in self.z_logas:
             _constrain(self.z_logas[key])
 
-    def cdf_qz(self, x, loga):
+    def cdf_qz(self, x, loga): #??
         """Implements the CDF of the 'stretched' concrete distribution"""
         xn = (x - limit_a) / (limit_b - limit_a)
         logits = math.log(xn) - math.log(1 - xn)
@@ -235,7 +238,6 @@ class L0Module(Module):
         num_parameters += torch.sum(torch.outer(hidden_score, int_score)) * 2
         return num_parameters
 
-
     def get_num_parameters_and_constraint(self):
         num_parameters = 0
 
@@ -252,11 +254,9 @@ class L0Module(Module):
         num_parameters += torch.sum(int_score) * self.parameters_per_dim["intermediate"]
         return num_parameters
 
-
     def get_target_sparsity(self, pruned_steps):
         target_sparsity = (self.target_sparsity - self.start_sparsity) * min(1, pruned_steps / self.lagrangian_warmup) + self.start_sparsity
         return target_sparsity
-
 
     def lagrangian_regularization(self, pruned_steps):
         target_sparsity = self.target_sparsity
@@ -351,9 +351,7 @@ class L0Module(Module):
         logger.info(f"pruned_model_size: {pruned_model_size}")
         logger.info(f"remaining_model_size: {remaining_model_size}")
 
-        return results
-
-        
+        return results  
 
     def forward(self, training=True,):
         zs = {f"{type}_z": [] for type in self.types}

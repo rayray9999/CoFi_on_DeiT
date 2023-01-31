@@ -222,8 +222,6 @@ def main():
             f"Model Size after pruning: {calculate_parameters(model)}")
 
     l0_module = None
-    print("AAAAAAAAAAAAA")
-    print(additional_args)
     if additional_args.pruning_type is not None:
         l0_module = L0Module(config=config,
                              droprate_init=additional_args.droprate_init,
