@@ -185,7 +185,10 @@ class CoFiBertEmbeddings(BertEmbeddings):
 
         if hidden_z is not None:
             embeddings = embeddings.mul(hidden_z)
+            
+        # (LayerNorm): LayerNorm((768,), eps=1e-12, elementwise_affine=True)
         embeddings = self.LayerNorm(embeddings, hidden_z)
+        # (dropout): Dropout(p=0.1, inplace=False)
         embeddings = self.dropout(embeddings)
 
         if hidden_z is not None:
