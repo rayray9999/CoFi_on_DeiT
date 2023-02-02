@@ -24,6 +24,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput, MaskedLMOutput
 from transformers.modeling_utils import PreTrainedModel
@@ -37,8 +38,7 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from configuration_deit import DeiTConfig
-##Cofi use below import
-from torch.nn import functional as F
+
 
 logger = logging.get_logger(__name__)
 
@@ -60,29 +60,6 @@ DEIT_PRETRAINED_MODEL_ARCHIVE_LIST = [
 ]
 
 
-
-class DeiTLayerNorm(torch.nn.LayerNorm): ##copy from cofi
-    def __init__(self, normalized_shape, eps: float = 1e-5, elementwise_affine: bool = True) -> None:
-        super().__init__(normalized_shape, eps, elementwise_affine)
-
-    def forward(self, input, hidden_z=None):
-        if hidden_z is not None:
-            remaining_index = torch.where(~hidden_z.eq(0))[0]
-            compressed_input = torch.index_select(
-                input, dim=-1, index=remaining_index)
-            compressed_weight = self.weight[remaining_index]
-            compressed_bias = self.bias[remaining_index]
-            normalized_shape = len(remaining_index)
-            normed_input = F.layer_norm(
-                compressed_input, [normalized_shape], compressed_weight, compressed_bias, self.eps)
-            output = input.clone()
-            output[:, :, remaining_index] = normed_input
-        else:
-            output = F.layer_norm(
-                input, self.normalized_shape, self.weight, self.bias, self.eps)
-        return output
-
-
 class DeiTEmbeddings(nn.Module):
     """
     Construct the CLS token, distillation token, position and patch embeddings. Optionally, also the mask token.
@@ -99,8 +76,7 @@ class DeiTEmbeddings(nn.Module):
         self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 2, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    ## parameter add: hidden_z
-    def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.BoolTensor] = None, hidden_z = None) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.BoolTensor] = None) -> torch.Tensor:
         embeddings = self.patch_embeddings(pixel_values)
         batch_size, seq_length, _ = embeddings.size()
 
@@ -114,19 +90,7 @@ class DeiTEmbeddings(nn.Module):
         distillation_tokens = self.distillation_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, distillation_tokens, embeddings), dim=1)
         embeddings = embeddings + self.position_embeddings
-
-
-        ##
-        if hidden_z is not None:
-            embeddings = embeddings.mul(hidden_z)
-
-        #/ missing layernorm in bert
-        # (dropout): Dropout(p=0.0, inplace=False)
         embeddings = self.dropout(embeddings)
-
-        ##
-        if hidden_z is not None:
-            embeddings = embeddings.mul(hidden_z)
         return embeddings
 
 
@@ -164,6 +128,8 @@ class DeiTPatchEmbeddings(nn.Module):
             )
         x = self.projection(pixel_values).flatten(2).transpose(1, 2)
         return x
+
+
 # Copied from transformers.models.vit.modeling_vit.ViTSelfAttention with ViT->DeiT
 class DeiTSelfAttention(nn.Module):
     def __init__(self, config: DeiTConfig) -> None:
@@ -173,32 +139,25 @@ class DeiTSelfAttention(nn.Module):
                 f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
                 f"heads {config.num_attention_heads}."
             )
-        #self.config = config #cofi
+
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
-        #bias就是那個ax+b的b吧，看起來是可以透過config調
+
         self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
         self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
         self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-    #q跟k可以做矩陣運算
+
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
         return x.permute(0, 2, 1, 3)
 
     def forward(
-        self, 
-        hidden_states, 
-        attention_mask = None, ##新的mask
-        head_mask = None, ##我改成CoFi的格式
-        output_attentions: bool = False
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]: 
-        #上面在講forward可以return 兩個
-        if self.value is None: ##cofi，如果沒有v就直接停掉
-            return (None, None) if output_attentions else (None,)
+        self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         mixed_query_layer = self.query(hidden_states)
 
         key_layer = self.transpose_for_scores(self.key(hidden_states))
@@ -210,8 +169,6 @@ class DeiTSelfAttention(nn.Module):
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
-        if attention_mask is not None: ##mask操作 by cofi
-            attention_scores = attention_scores + attention_mask
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
 
@@ -246,21 +203,13 @@ class DeiTSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, head_layer_z=None, hidden_z=None, inference=False) -> torch.Tensor:
-        if hidden_states is None:## modify from cofi
-            return input_tensor
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+
         hidden_states = self.dense(hidden_states)
-        if head_layer_z is not None:
-            hidden_states = hidden_states.mul(head_layer_z)
-        if not inference and hidden_states.sum().eq(0).item():
-            hidden_states = hidden_states + input_tensor
-        else:
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
-            hidden_states = self.dropout(hidden_states)
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
+        hidden_states = self.dropout(hidden_states)
+
         return hidden_states
+
 
 # Copied from transformers.models.vit.modeling_vit.ViTAttention with ViT->DeiT
 class DeiTAttention(nn.Module):
@@ -293,12 +242,7 @@ class DeiTAttention(nn.Module):
         hidden_states: torch.Tensor,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
-        head_z=None,
-        head_layer_z=None,
-        hidden_z=None
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-
-    
         self_outputs = self.attention(hidden_states, head_mask, output_attentions)
 
         attention_output = self.output(self_outputs[0], hidden_states)
@@ -313,7 +257,6 @@ class DeiTIntermediate(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
-            #ACT2FN是激活函数的字典，ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
@@ -326,28 +269,20 @@ class DeiTIntermediate(nn.Module):
         return hidden_states
 
 
-
 # Copied from transformers.models.vit.modeling_vit.ViTOutput with ViT->DeiT
 class DeiTOutput(nn.Module):
     def __init__(self, config: DeiTConfig) -> None:
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, mlp_z, hidden_z=None, inference=False) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        if mlp_z is not None:##加上mlp mask
-            hidden_states *= mlp_z
-        if not inference and hidden_states.sum().eq(0).item():##照著Cofi加，我不確定要幹嘛
-            return hidden_states + input_tensor
-        else:
-            if hidden_z is not None: ##mask
-                hidden_states = hidden_states.mul(hidden_z)
-            hidden_states = self.dropout(hidden_states)
-            hidden_states = hidden_states + input_tensor ##Cofi在這裡是作layerNorm，但這個處理應該有被放在DeiTlayer
-            if hidden_z is not None:## mask
-                hidden_states = hidden_states.mul(hidden_z)
-        return hidden_states
 
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        hidden_states = hidden_states + input_tensor
+
+        return hidden_states
 
 
 # Copied from transformers.models.vit.modeling_vit.ViTLayer with ViT->DeiT
@@ -359,52 +294,36 @@ class DeiTLayer(nn.Module):
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.attention = DeiTAttention(config)
-        self.intermediate = DeiTIntermediate(config) #DeiT多出來的function same as in bertlayer
+        self.intermediate = DeiTIntermediate(config)
         self.output = DeiTOutput(config)
-        ##change to costum DeiTLayerNorm
-        self.layernorm_before = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
-        head_z=None, ##add mask
-        head_layer_z=None,
-        intermediate_z=None,
-        mlp_z=None,
-        hidden_z=None
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        ##
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in DeiT, layernorm is applied before self-attention
             head_mask,
             output_attentions=output_attentions,
-            # head_z=head_z,
-            # head_layer_z=head_layer_z,
-            # hidden_z=hidden_z
         )
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
-        if self.intermediate.dense is None:
-            layer_output = attention_output
-        else:
-            self.intermediate_z = intermediate_z
-            self.mlp_z = mlp_z
-            self.hidden_z = hidden_z
-            # first residual connection 就是所謂的add
-            hidden_states = attention_output + hidden_states##這個在CoFi裡面沒有，怪怪的
 
-            # in DeiT, layernorm is also applied after self-attention
-            layer_output = self.layernorm_after(hidden_states)
-            layer_output = self.intermediate(layer_output)
-            if self.intermediate_z is not None:
-                intermediate_output = intermediate_output.mul(self.intermediate_z)
-            ## go through output add mask parameter
-            layer_output = self.output(layer_output, hidden_states, self.mlp_z, self.hidden_z)
+        # first residual connection
+        hidden_states = attention_output + hidden_states
 
-            outputs = (layer_output,) + outputs #這裡在CoFi裡面會加上(attention_output, )，看不懂
+        # in DeiT, layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
+
+        # second residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
+
+        outputs = (layer_output,) + outputs
 
         return outputs
 
@@ -424,11 +343,6 @@ class DeiTEncoder(nn.Module):
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
-        head_z=None,
-        head_layer_z=None,
-        intermediate_z=None,
-        mlp_z=None,
-        hidden_z=None
     ) -> Union[tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -436,7 +350,8 @@ class DeiTEncoder(nn.Module):
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
-            layer_head_mask = head_mask[i] if head_mask is not None else None #DeiT do this, I'm not sure
+
+            layer_head_mask = head_mask[i] if head_mask is not None else None
 
             if self.gradient_checkpointing and self.training:
 
@@ -452,16 +367,7 @@ class DeiTEncoder(nn.Module):
                     layer_head_mask,
                 )
             else:
-                layer_outputs = layer_module(
-                hidden_states,
-                layer_head_mask,##modify as CoFi
-                output_attentions,
-                intermediate_z=intermediate_z[i] if intermediate_z is not None else None,
-                head_z=head_z[i] if head_z is not None else None,
-                mlp_z=mlp_z[i] if mlp_z is not None else None,
-                head_layer_z=head_layer_z[i] if head_layer_z is not None else None,
-                hidden_z=hidden_z
-            )
+                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions)
 
             hidden_states = layer_outputs[0]
 
@@ -480,8 +386,6 @@ class DeiTEncoder(nn.Module):
         )
 
 
-
-##below function have layernorm but I'm not sure how to change
 class DeiTPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
@@ -493,7 +397,7 @@ class DeiTPreTrainedModel(PreTrainedModel):
     main_input_name = "pixel_values"
     supports_gradient_checkpointing = True
     _no_split_modules = []
-    ##not sure
+
     def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
         """Initialize the weights"""
         if isinstance(module, (nn.Linear, nn.Conv2d)):
@@ -546,6 +450,7 @@ DEIT_INPUTS_DOCSTRING = r"""
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
 
+
 @add_start_docstrings(
     "The bare DeiT Model transformer outputting raw hidden-states without any specific head on top.",
     DEIT_START_DOCSTRING,
@@ -557,8 +462,8 @@ class DeiTModel(DeiTPreTrainedModel):
 
         self.embeddings = DeiTEmbeddings(config, use_mask_token=use_mask_token)
         self.encoder = DeiTEncoder(config)
-        ##DeiTLayerNorm
-        self.layernorm = DeiTLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.pooler = DeiTPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
@@ -591,11 +496,6 @@ class DeiTModel(DeiTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        head_layer_z=None,
-        head_z=None,
-        intermediate_z=None,
-        mlp_z=None,
-        hidden_z=None
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -618,7 +518,7 @@ class DeiTModel(DeiTPreTrainedModel):
         if pixel_values.dtype != expected_dtype:
             pixel_values = pixel_values.to(expected_dtype)
 
-        embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos, hidden_z=hidden_z)
+        embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
 
         encoder_outputs = self.encoder(
             embedding_output,
@@ -626,13 +526,6 @@ class DeiTModel(DeiTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            #attention_mask=extended_attention_mask,
-            #encoder_hidden_states=encoder_hidden_states,
-            intermediate_z=intermediate_z,
-            head_z=head_z,
-            mlp_z=mlp_z,
-            head_layer_z=head_layer_z,
-            hidden_z=hidden_z
         )
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
