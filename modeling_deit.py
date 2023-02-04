@@ -192,9 +192,9 @@ class DeiTSelfAttention(nn.Module):
     def forward(
         self, 
         hidden_states, 
-        attention_mask = None, ##新的mask
         head_mask = None, ##我改成CoFi的格式
         output_attentions: bool = False
+        attention_mask = None, ##新的mask
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]: 
         #上面在講forward可以return 兩個
         if self.value is None: ##cofi，如果沒有v就直接停掉
@@ -210,6 +210,7 @@ class DeiTSelfAttention(nn.Module):
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
+
         if attention_mask is not None: ##mask操作 by cofi
             attention_scores = attention_scores + attention_mask
         # Normalize the attention scores to probabilities.
@@ -223,12 +224,22 @@ class DeiTSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
+        print(f'*********************head_mask**********************')
+        print(head_mask)
         context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 
+        # print(f'*********************key_layer**********************')
+        # print(key_layer)
+        # print(f'*********************value_layer**********************')
+        # print(value_layer)
+        # print(f'*********************query_layer**********************')
+        # print(query_layer)
+        # print(f'*********************context_layer**********************')
+        # print(context_layer)
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
         return outputs
@@ -271,6 +282,7 @@ class DeiTAttention(nn.Module):
         self.pruned_heads = set()
 
     def prune_heads(self, heads: Set[int]) -> None:
+        print("used_prune")
         if len(heads) == 0:
             return
         heads, index = find_pruneable_heads_and_indices(
@@ -299,10 +311,16 @@ class DeiTAttention(nn.Module):
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
 
     
+        print(f'*********************output_attentions**********************')
+        print(output_attentions)
         self_outputs = self.attention(hidden_states, head_mask, output_attentions)
 
+        print(f'*********************self_output**********************')
+        print(self_outputs[0])
         attention_output = self.output(self_outputs[0], hidden_states)
 
+        print(f'*********************attention_output**********************')
+        print(attention_output[0])
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -415,6 +433,7 @@ class DeiTEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([DeiTLayer(config) for _ in range(config.num_hidden_layers)])
+        # print(self.layer)
         self.gradient_checkpointing = False
 
     def forward(
@@ -434,10 +453,13 @@ class DeiTEncoder(nn.Module):
         all_self_attentions = () if output_attentions else None
 
         for i, layer_module in enumerate(self.layer):
+            
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
             layer_head_mask = head_mask[i] if head_mask is not None else None #DeiT do this, I'm not sure
 
+            print(f'*********************head_mask{i}**********************')
+            print(layer_head_mask)
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -464,7 +486,9 @@ class DeiTEncoder(nn.Module):
             )
 
             hidden_states = layer_outputs[0]
-
+            
+            print(f'*********************encoder_layer{i}_output**********************')
+            print(layer_outputs[0])
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
@@ -572,6 +596,7 @@ class DeiTModel(DeiTPreTrainedModel):
         Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
         class PreTrainedModel
         """
+        print("used_prune")
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
@@ -603,6 +628,8 @@ class DeiTModel(DeiTPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        print(output_attentions, output_hidden_states, return_dict)
+
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
 
@@ -620,6 +647,8 @@ class DeiTModel(DeiTPreTrainedModel):
 
         embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos, hidden_z=hidden_z)
 
+        print("*********************embeddings_output**********************")
+        print(embedding_output)
         encoder_outputs = self.encoder(
             embedding_output,
             head_mask=head_mask,
@@ -634,9 +663,13 @@ class DeiTModel(DeiTPreTrainedModel):
             head_layer_z=head_layer_z,
             hidden_z=hidden_z
         )
+
+        print("*********************encoder_output**********************")
+        print(encoder_outputs)
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+
 
         if not return_dict:
             head_outputs = (sequence_output, pooled_output) if pooled_output is not None else (sequence_output,)

@@ -169,6 +169,7 @@ class DeiTSelfAttention(nn.Module):
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
+
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
 
@@ -180,12 +181,22 @@ class DeiTSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
+        # print(f'*********************head_mask**********************')
+        # print(head_mask)
         context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 
+        # print(f'*********************key_layer**********************')
+        # print(key_layer)
+        # print(f'*********************value_layer**********************')
+        # print(value_layer)
+        # print(f'*********************query_layer**********************')
+        # print(query_layer)
+        # print(f'*********************context_layer**********************')
+        # print(context_layer)
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
         return outputs
@@ -243,10 +254,16 @@ class DeiTAttention(nn.Module):
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        # print(f'*********************output_attentions**********************')
+        # print(output_attentions)
         self_outputs = self.attention(hidden_states, head_mask, output_attentions)
 
+        # print(f'*********************self_output**********************')
+        # print(self_outputs[0])
         attention_output = self.output(self_outputs[0], hidden_states)
 
+        # print(f'*********************attention_output**********************')
+        # print(attention_output[0])
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -311,6 +328,7 @@ class DeiTLayer(nn.Module):
             output_attentions=output_attentions,
         )
         attention_output = self_attention_outputs[0]
+        
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
 
         # first residual connection
@@ -353,6 +371,8 @@ class DeiTEncoder(nn.Module):
 
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
+            # print(f'*********************head_mask{i}**********************')
+            # print(layer_head_mask)
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -371,6 +391,8 @@ class DeiTEncoder(nn.Module):
 
             hidden_states = layer_outputs[0]
 
+            # print(f'*********************encoder_layer{i}_output**********************')
+            # print(layer_outputs[0])
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
@@ -520,6 +542,8 @@ class DeiTModel(DeiTPreTrainedModel):
 
         embedding_output = self.embeddings(pixel_values, bool_masked_pos=bool_masked_pos)
 
+        print("*********************embeddings_output**********************")
+        print(embedding_output)
         encoder_outputs = self.encoder(
             embedding_output,
             head_mask=head_mask,
@@ -527,6 +551,8 @@ class DeiTModel(DeiTPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        print("*********************encoder_output**********************")
+        print(encoder_outputs)
         sequence_output = encoder_outputs[0]
         sequence_output = self.layernorm(sequence_output)
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
